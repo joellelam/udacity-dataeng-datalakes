@@ -24,11 +24,10 @@ def create_spark_session():
         .getOrCreate()
     sc=spark.sparkContext
     hadoop_conf=sc._jsc.hadoopConfiguration()
-    hadoop_conf.set("fs.s3n.impl", "org.apache.hadoop.fs.s3native.NativeS3FileSystem")
-    #TODO: Pull from environment
-    hadoop_conf.set("fs.s3n.awsAccessKeyId", os.environ['AWS_ACCESS_KEY_ID'])
-    hadoop_conf.set("fs.s3n.awsSecretAccessKey", os.environ['AWS_SECRET_ACCESS_KEY'])
-    #hadoop_conf.set("mapreduce.fileoutputcommitter.algorithm.version", "2")
+    
+    hadoop_conf.set("fs.s3a.access.key", os.environ['AWS_ACCESS_KEY_ID'])
+    hadoop_conf.set("fs.s3a.secret.key", os.environ['AWS_SECRET_ACCESS_KEY'])
+    hadoop_conf.set("mapreduce.fileoutputcommitter.algorithm.version", "2")
     return spark
 
 def process_song_data(spark, input_data, output_data):
@@ -89,21 +88,25 @@ def process_log_data(spark, input_data, output_data):
     # df = 
 
     # extract columns for users table    
-    users_table = df.select('userId', 'firstName', 'lastName', 'level')
+    users_table = df.select('userId', 'firstName', 'lastName', 'level','ts', 'gender')
     users_table = users_table.withColumnRenamed("userId", "user_id")
     users_table = users_table.withColumnRenamed("firstName", "first_name")
     users_table = users_table.withColumnRenamed("lastName", "last_name")
-    users_table = users_table.dropDuplicates().filter("user_id != ''").sort(["user_id"])
+    users_table = users_table.filter("user_id != ''")
     
+    # remove duplicates user_ids and only retain the most recent values.
+    users_table = users_table.orderBy("user_id", F.col("ts").desc()).dropDuplicates(["user_id"])
+    users_table.drop('ts')
+
     # write users table to parquet files
     # TODO: Enable this again
-    users_table.write.parquet("s3n://udacityproject4/users.parquet", mode="overwrite")
+    users_table.write.parquet( output_data + "/users.parquet", mode="overwrite")
 
     # time - timestamps of records in songplays broken down into specific units
     # start_time, hour, day, week, month, year, weekday
 
     #Resolve Start Time
-    time_table = df.select('ts').withColumn("start_time", to_timestamp(from_unixtime(F.col('ts')/1000)))
+    time_table = df.select('ts').dropDuplicates().withColumn("start_time", to_timestamp(from_unixtime(F.col('ts')/1000)))
 
     #Resolve Hour
     get_hour = udf(lambda x: datetime.datetime.fromtimestamp(x / 1000.0).hour)
@@ -130,33 +133,36 @@ def process_log_data(spark, input_data, output_data):
 
     # Remove TS since it's no longer needed
     time_table = time_table.drop('ts')
+    
+    # write time table to parquet files
+    time_table.write.parquet( output_data + "/time.parquet", mode="overwrite")
 
     # read in song data to use for songplays table
     # get filepath to song data file
     song_data = input_data + "/song_data/*/*/*/*.json"
-    song_df = spark.read.json(song_data)
+    song_df = spark.read.json(song_data).drop('year')
 
     # extract columns from joined song and log datasets to create songplays table 
-    df = df.select('ts', 'userId', 'level', 'artist', 'sessionId', 'userAgent','song').sort('song')
+    df = df.withColumn("year", get_year(df.ts))
+    df = df.withColumn("month", get_month(df.ts))
+    df = df.select('ts', 'userId', 'level', 'artist', 'sessionId', 'userAgent','song', 'year', 'month')
     df = df.withColumn("start_time", to_timestamp(from_unixtime(F.col('ts')/1000)))
     songplays_table = df.join(song_df, song_df.title == df.song)
     songplays_table = songplays_table.withColumnRenamed("userId", "user_id")
     songplays_table = songplays_table.withColumnRenamed("sessionId", "session_id")
     songplays_table = songplays_table.withColumnRenamed("artist_location", "location")
     songplays_table = songplays_table.withColumnRenamed("userAgent", "user_agent")
-    songplays_table.select('start_time', 'user_id', 'level', 'song_id', 'artist_id', 'session_id', 'location', 'user_agent')
+    songplays_table.select('start_time', 'user_id', 'level', 'song_id', 'artist_id', 'session_id', 'location', 'user_agent', 'year', 'month')
     songplays_table = songplays_table.withColumn("songplay_id", monotonically_increasing_id())
 
     # write songplays table to parquet files partitioned by year and month
-    songplays_table.write.parquet( output_data + "/songplays.parquet", mode="overwrite")
-    print(songplays_table.toPandas().head(3))
-
+    songplays_table.write.partitionBy(['year', 'month']).parquet( output_data + "/songplays.parquet", mode="overwrite")
 
 def main():
     """Main method for etl"""
    
-    input_data = "s3n://udacity-dend"
-    output_data = "s3n://udacityproject4"
+    input_data = "s3a://udacity-dend"
+    output_data = "s3a://udacityproject4"
     
     # Argument Management Borrowed From: https://www.tutorialspoint.com/python/python_command_line_arguments
     try:
@@ -165,7 +171,6 @@ def main():
         print ('etl.py -i <inputdata> -o <outputdata>')
         sys.exit(2)
         
-    print("opts: ", opts)
     for opt, arg in opts:      
         if opt == '-h':
             print ('etl.py -i <inputdata> -o <outputdata>')
@@ -180,7 +185,7 @@ def main():
     spark = create_spark_session()
     
     process_song_data(spark, input_data, output_data)    
-    #process_log_data(spark, input_data, output_data)
+    process_log_data(spark, input_data, output_data)
 
 
 if __name__ == "__main__":
