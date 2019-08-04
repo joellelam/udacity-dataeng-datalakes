@@ -82,10 +82,6 @@ def process_log_data(spark, input_data, output_data):
     
     # read log data file
     df = spark.read.json(log_data)
-    
-    # filter by actions for song plays
-    # TODO: Decide if I need this?
-    # df = 
 
     # extract columns for users table    
     users_table = df.select('userId', 'firstName', 'lastName', 'level','ts', 'gender')
@@ -99,7 +95,6 @@ def process_log_data(spark, input_data, output_data):
     users_table.drop('ts')
 
     # write users table to parquet files
-    # TODO: Enable this again
     users_table.write.parquet( output_data + "/users.parquet", mode="overwrite")
 
     # time - timestamps of records in songplays broken down into specific units
@@ -140,17 +135,22 @@ def process_log_data(spark, input_data, output_data):
     # read in song data to use for songplays table
     # get filepath to song data file
     song_data = input_data + "/song_data/*/*/*/*.json"
-    song_df = spark.read.json(song_data).drop('year')
+    song_df = spark.read.json(song_data).drop('year').drop('location')
 
     # extract columns from joined song and log datasets to create songplays table 
     df = df.withColumn("year", get_year(df.ts))
     df = df.withColumn("month", get_month(df.ts))
-    df = df.select('ts', 'userId', 'level', 'artist', 'sessionId', 'userAgent','song', 'year', 'month')
+    #df = df.select('ts', 'userId', 'level', 'artist', 'sessionId', 'userAgent','song', 'year', 'month')
     df = df.withColumn("start_time", to_timestamp(from_unixtime(F.col('ts')/1000)))
-    songplays_table = df.join(song_df, song_df.title == df.song)
+    
+    # join tables.
+    songplays_table = df.join(song_df, ((song_df.title == df.song) & (song_df.artist_name == df.artist) & (song_df.duration == df.length)))
+
+    # songplays - records in log data associated with song plays i.e. records with page NextSong
+    # songplay_id, start_time, user_id, level, song_id, artist_id, session_id, location, user_agent
     songplays_table = songplays_table.withColumnRenamed("userId", "user_id")
     songplays_table = songplays_table.withColumnRenamed("sessionId", "session_id")
-    songplays_table = songplays_table.withColumnRenamed("artist_location", "location")
+    #songplays_table = songplays_table.withColumnRenamed("artist_location", "location")
     songplays_table = songplays_table.withColumnRenamed("userAgent", "user_agent")
     songplays_table.select('start_time', 'user_id', 'level', 'song_id', 'artist_id', 'session_id', 'location', 'user_agent', 'year', 'month')
     songplays_table = songplays_table.withColumn("songplay_id", monotonically_increasing_id())
